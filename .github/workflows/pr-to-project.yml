@@ -1,0 +1,255 @@
+name: Create Project Ticket on PR
+
+on:
+  pull_request:
+    types: [opened, reopened]
+
+jobs:
+  create-project-ticket:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      project: write
+    
+    steps:
+      - name: Get PR information
+        id: pr_info
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const pr = context.payload.pull_request;
+            return {
+              title: pr.title,
+              body: pr.body || pr.title,
+              number: pr.number,
+              author: pr.user.login,
+              url: pr.html_url,
+              branch: pr.head.ref
+            };
+
+      - name: Get Project ID
+        id: project
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            // Get the repository owner and name
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            
+            // Try to get Projects V2 (new GitHub Projects) first
+            let projectId = null;
+            let projectNumber = null;
+            
+            try {
+              // List Projects V2 for the repository
+              const projectsV2 = await github.graphql(`
+                query($owner: String!, $repo: String!) {
+                  repository(owner: $owner, name: $repo) {
+                    projectsV2(first: 1) {
+                      nodes {
+                        id
+                        number
+                        title
+                      }
+                    }
+                  }
+                }
+              `, {
+                owner: owner,
+                repo: repo
+              });
+              
+              if (projectsV2.repository.projectsV2.nodes.length > 0) {
+                projectId = projectsV2.repository.projectsV2.nodes[0].id;
+                projectNumber = projectsV2.repository.projectsV2.nodes[0].number;
+                console.log(`Found Project V2: ${projectsV2.repository.projectsV2.nodes[0].title} (ID: ${projectId})`);
+              }
+            } catch (error) {
+              console.log('Could not access Projects V2, trying legacy Projects API');
+            }
+            
+            // Fallback to legacy Projects API
+            if (!projectId) {
+              try {
+                const projects = await github.rest.projects.listForRepo({
+                  owner: owner,
+                  repo: repo,
+                });
+                
+                if (projects.data.length > 0) {
+                  projectId = projects.data[0].id;
+                  console.log(`Found legacy project: ${projects.data[0].name} (ID: ${projectId})`);
+                } else {
+                  // Try organization projects
+                  try {
+                    const orgProjects = await github.rest.projects.listForOrg({
+                      org: owner,
+                    });
+                    if (orgProjects.data.length > 0) {
+                      projectId = orgProjects.data[0].id;
+                      console.log(`Found organization project: ${orgProjects.data[0].name} (ID: ${projectId})`);
+                    }
+                  } catch (error) {
+                    console.log('No organization projects found or access denied');
+                  }
+                }
+              } catch (error) {
+                console.log('Could not access legacy Projects API:', error.message);
+              }
+            }
+            
+            if (!projectId) {
+              console.log('⚠️ No projects found. Please create a GitHub Project first.');
+              core.setOutput('id', '');
+              core.setOutput('number', '');
+            } else {
+              core.setOutput('id', String(projectId));
+              core.setOutput('number', String(projectNumber || ''));
+            }
+
+      - name: Create Project Item from PR
+        if: steps.project.outputs.id != ''
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const pr = context.payload.pull_request;
+            const projectId = '${{ steps.project.outputs.id }}';
+            const projectNumber = '${{ steps.project.outputs.number }}';
+            
+            if (!projectId) {
+              console.log('Skipping: No project ID found');
+              return;
+            }
+            
+            console.log(`Using project ID: ${projectId}`);
+            
+            // Try to add PR directly to Project V2 first
+            let addedDirectly = false;
+            if (projectNumber) {
+              try {
+                const result = await github.graphql(`
+                  mutation($projectId: ID!, $contentId: ID!) {
+                    addProjectV2ItemById(input: {
+                      projectId: $projectId
+                      contentId: $contentId
+                    }) {
+                      item {
+                        id
+                      }
+                    }
+                  }
+                `, {
+                  projectId: projectId,
+                  contentId: pr.node_id
+                });
+                
+                console.log(`✅ Added PR #${pr.number} directly to Project V2`);
+                addedDirectly = true;
+                
+                // Comment on PR
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: pr.number,
+                  body: `📋 **Project Ticket Created**\n\nThis PR has been automatically added to the project board.`
+                });
+              } catch (error) {
+                console.log('Could not add PR directly to Project V2:', error.message);
+              }
+            }
+            
+            // Fallback: Create issue and add to project
+            if (!addedDirectly) {
+              try {
+                // Create an issue linked to the PR
+                const issue = await github.rest.issues.create({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  title: `[Frontend PR #${pr.number}] ${pr.title}`,
+                  body: `**Pull Request:** #${pr.number}\n\n**Repository:** Frontend (React)\n\n**Author:** @${pr.user.login}\n\n**Branch:** \`${pr.head.ref}\`\n\n**Description:**\n${pr.body || 'No description provided'}\n\n**Link:** ${pr.html_url}\n\n---\n\n*This ticket was automatically created from Pull Request #${pr.number}*`,
+                  labels: ['frontend', 'project-management', 'pull-request']
+                });
+                
+                // Try to add issue to Project V2
+                if (projectNumber) {
+                  try {
+                    await github.graphql(`
+                      mutation($projectId: ID!, $contentId: ID!) {
+                        addProjectV2ItemById(input: {
+                          projectId: $projectId
+                          contentId: $contentId
+                        }) {
+                          item {
+                            id
+                          }
+                        }
+                      }
+                    `, {
+                      projectId: projectId,
+                      contentId: issue.data.node_id
+                    });
+                    
+                    console.log(`✅ Created project item for PR #${pr.number} via issue #${issue.data.number}`);
+                  } catch (error) {
+                    console.log('Could not add issue to Project V2, trying legacy API');
+                    // Fallback to legacy API
+                    await github.rest.projects.createCard({
+                      project_id: projectId,
+                      content_id: issue.data.id,
+                      content_type: 'Issue'
+                    });
+                    console.log(`✅ Created project card for PR #${pr.number} via issue #${issue.data.number}`);
+                  }
+                } else {
+                  // Legacy project
+                  await github.rest.projects.createCard({
+                    project_id: projectId,
+                    content_id: issue.data.id,
+                    content_type: 'Issue'
+                  });
+                  console.log(`✅ Created project card for PR #${pr.number} via issue #${issue.data.number}`);
+                }
+                
+                // Comment on PR
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: pr.number,
+                  body: `📋 **Project Ticket Created**\n\nIssue #${issue.data.number} has been created and added to the project board.\n\nView issue: ${issue.data.html_url}`
+                });
+              } catch (error) {
+                console.log('Error creating project item:', error.message);
+                throw error;
+              }
+            }
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## PR to Project Integration Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Repository:** Frontend (React)" >> $GITHUB_STEP_SUMMARY
+          echo "- **PR Number:** #${{ github.event.pull_request.number }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **PR Title:** ${{ github.event.pull_request.title }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Author:** @${{ github.event.pull_request.user.login }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Branch:** \`${{ github.event.pull_request.head.ref }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Project ID:** ${{ steps.project.outputs.id }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.project.outputs.id }}" != "" ]; then
+            echo "✅ Project ticket creation attempted" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "The PR has been added to the project board." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️ No project found. Please create a GitHub Project first." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "To set up:" >> $GITHUB_STEP_SUMMARY
+            echo "1. Go to your repository" >> $GITHUB_STEP_SUMMARY
+            echo "2. Click on the **Projects** tab" >> $GITHUB_STEP_SUMMARY
+            echo "3. Create a new project" >> $GITHUB_STEP_SUMMARY
+          fi
+

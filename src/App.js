@@ -147,7 +147,7 @@ function Navigation() {
 
 function App() {
   return (
-    <Router>
+    <Router basename="/queue">
       <div className="App">
         <Navigation />
         <Routes>

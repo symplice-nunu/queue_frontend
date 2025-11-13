@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, Link } from 'react-router-dom';
 import { authAPI } from '../services/api';
 
 function Login() {
@@ -81,7 +81,7 @@ function Login() {
         </form>
 
         <div className="mt-6 text-center text-sm text-gray-600">
-          <p>Public display: <a href="/display" className="text-blue-600 hover:underline">View Queue</a></p>
+          <p>Public display: <Link to="/display" className="text-blue-600 hover:underline">View Queue</Link></p>
         </div>
       </div>
     </div>
