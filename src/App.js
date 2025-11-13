@@ -60,8 +60,8 @@ function Navigation() {
             </Link>
             {user && (
               <div className="flex items-center space-x-3 border-l border-gray-300 pl-4">
-                <span className="text-sm text-gray-700 hidden lg:inline">{user.name}</span>
-                <span className="text-sm text-gray-700 lg:hidden">{user.name.split(' ')[0]}</span>
+                <span className="text-sm text-gray-700 hidden lg:inline">{user.name || 'User'}</span>
+                <span className="text-sm text-gray-700 lg:hidden">{(user.name || 'User').split(' ')[0]}</span>
                 <button
                   onClick={handleLogout}
                   className="px-3 py-2 rounded-md text-sm font-medium text-gray-600 hover:text-gray-900 hover:bg-gray-100"
@@ -76,7 +76,7 @@ function Navigation() {
           <div className="md:hidden flex items-center">
             {user && (
               <span className="text-xs text-gray-600 mr-3 hidden sm:inline">
-                {user.name.split(' ')[0]}
+                {(user.name || 'User').split(' ')[0]}
               </span>
             )}
             <button
@@ -124,8 +124,8 @@ function Navigation() {
             {user && (
               <>
                 <div className="px-3 py-2 border-t border-gray-200 mt-2">
-                  <p className="text-sm font-medium text-gray-900">{user.name}</p>
-                  <p className="text-xs text-gray-500">{user.email}</p>
+                  <p className="text-sm font-medium text-gray-900">{user.name || 'User'}</p>
+                  <p className="text-xs text-gray-500">{user.email || ''}</p>
                 </div>
                 <button
                   onClick={() => {
