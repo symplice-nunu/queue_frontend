@@ -31,6 +31,23 @@ jest.mock('./services/api', () => {
   };
 });
 
+// Mock BrowserRouter to use MemoryRouter in tests
+// This allows tests to work properly without browser history
+jest.mock('react-router-dom', () => {
+  const actual = jest.requireActual('react-router-dom');
+  const React = require('react');
+  return {
+    ...actual,
+    BrowserRouter: ({ children, basename }) => {
+      // In tests, we use MemoryRouter which doesn't need basename
+      // Routes are defined as "/login", "/", etc. in App.js
+      // When user is not authenticated, ProtectedRoute redirects to "/login"
+      const MemoryRouter = actual.MemoryRouter;
+      return React.createElement(MemoryRouter, { initialEntries: ['/login'], initialIndex: 0 }, children);
+    },
+  };
+});
+
 beforeEach(() => {
   localStorage.clear();
 });
