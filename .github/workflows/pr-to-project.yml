@@ -3,6 +3,10 @@ name: Create Project Ticket on PR
 on:
   pull_request:
     types: [opened, reopened]
+  push:
+    branches:
+      - main
+      - master
 
 jobs:
   create-project-ticket:
@@ -14,21 +18,41 @@ jobs:
       project: write
     
     steps:
-      - name: Get PR information
+      - name: Get PR or Commit information
         id: pr_info
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const pr = context.payload.pull_request;
-            return {
-              title: pr.title,
-              body: pr.body || pr.title,
-              number: pr.number,
-              author: pr.user.login,
-              url: pr.html_url,
-              branch: pr.head.ref
-            };
+            const core = require('@actions/core');
+            const isPR = context.eventName === 'pull_request';
+            
+            if (isPR) {
+              const pr = context.payload.pull_request;
+              core.setOutput('is_pr', 'true');
+              core.setOutput('title', pr.title);
+              core.setOutput('body', pr.body || pr.title);
+              core.setOutput('number', String(pr.number));
+              core.setOutput('author', pr.user.login);
+              core.setOutput('url', pr.html_url);
+              core.setOutput('branch', pr.head.ref);
+              core.setOutput('node_id', pr.node_id);
+            } else {
+              // Push event
+              const commit = context.payload.head_commit;
+              const commits = context.payload.commits || [];
+              const latestCommit = commits[commits.length - 1] || commit;
+              
+              core.setOutput('is_pr', 'false');
+              core.setOutput('title', latestCommit?.message?.split('\n')[0] || 'Direct push to main');
+              core.setOutput('body', latestCommit?.message || 'Direct push to main branch');
+              core.setOutput('number', '');
+              core.setOutput('author', latestCommit?.author?.username || context.actor);
+              core.setOutput('url', latestCommit?.url || context.payload.repository.html_url);
+              core.setOutput('branch', context.ref.replace('refs/heads/', ''));
+              core.setOutput('node_id', '');
+              core.setOutput('sha', context.sha);
+            }
 
       - name: Get Project ID
         id: project
@@ -111,15 +135,24 @@ jobs:
               core.setOutput('number', String(projectNumber || ''));
             }
 
-      - name: Create Project Item from PR
+      - name: Create Project Item from PR or Push
         if: steps.project.outputs.id != ''
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const pr = context.payload.pull_request;
+            const core = require('@actions/core');
+            const isPR = context.eventName === 'pull_request';
             const projectId = '${{ steps.project.outputs.id }}';
             const projectNumber = '${{ steps.project.outputs.number }}';
+            const title = '${{ steps.pr_info.outputs.title }}';
+            const body = '${{ steps.pr_info.outputs.body }}';
+            const author = '${{ steps.pr_info.outputs.author }}';
+            const branch = '${{ steps.pr_info.outputs.branch }}';
+            const url = '${{ steps.pr_info.outputs.url }}';
+            const prNumber = '${{ steps.pr_info.outputs.number }}';
+            const nodeId = '${{ steps.pr_info.outputs.node_id }}';
+            const sha = '${{ steps.pr_info.outputs.sha }}';
             
             if (!projectId) {
               console.log('Skipping: No project ID found');
@@ -127,10 +160,11 @@ jobs:
             }
             
             console.log(`Using project ID: ${projectId}`);
+            console.log(`Event type: ${isPR ? 'Pull Request' : 'Push'}`);
             
-            // Try to add PR directly to Project V2 first
+            // Try to add PR directly to Project V2 first (only for PRs)
             let addedDirectly = false;
-            if (projectNumber) {
+            if (isPR && projectNumber && nodeId) {
               try {
                 const result = await github.graphql(`
                   mutation($projectId: ID!, $contentId: ID!) {
@@ -145,17 +179,17 @@ jobs:
                   }
                 `, {
                   projectId: projectId,
-                  contentId: pr.node_id
+                  contentId: nodeId
                 });
                 
-                console.log(`✅ Added PR #${pr.number} directly to Project V2`);
+                console.log(`✅ Added PR #${prNumber} directly to Project V2`);
                 addedDirectly = true;
                 
                 // Comment on PR
                 await github.rest.issues.createComment({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
-                  issue_number: pr.number,
+                  issue_number: parseInt(prNumber),
                   body: `📋 **Project Ticket Created**\n\nThis PR has been automatically added to the project board.`
                 });
               } catch (error) {
@@ -163,16 +197,28 @@ jobs:
               }
             }
             
-            // Fallback: Create issue and add to project
+            // Fallback: Create issue and add to project (for both PRs and pushes)
             if (!addedDirectly) {
               try {
-                // Create an issue linked to the PR
+                const issueTitle = isPR 
+                  ? `[Frontend PR #${prNumber}] ${title}`
+                  : `[Frontend Push] ${title}`;
+                
+                const issueBody = isPR
+                  ? `**Pull Request:** #${prNumber}\n\n**Repository:** Frontend (React)\n\n**Author:** @${author}\n\n**Branch:** \`${branch}\`\n\n**Description:**\n${body}\n\n**Link:** ${url}\n\n---\n\n*This ticket was automatically created from Pull Request #${prNumber}*`
+                  : `**Commit:** ${sha ? sha.substring(0, 7) : 'N/A'}\n\n**Repository:** Frontend (React)\n\n**Author:** @${author}\n\n**Branch:** \`${branch}\`\n\n**Description:**\n${body}\n\n**Link:** ${url}\n\n---\n\n*This ticket was automatically created from a direct push to ${branch}*`;
+                
+                const labels = isPR 
+                  ? ['frontend', 'project-management', 'pull-request']
+                  : ['frontend', 'project-management', 'direct-push'];
+                
+                // Create an issue
                 const issue = await github.rest.issues.create({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
-                  title: `[Frontend PR #${pr.number}] ${pr.title}`,
-                  body: `**Pull Request:** #${pr.number}\n\n**Repository:** Frontend (React)\n\n**Author:** @${pr.user.login}\n\n**Branch:** \`${pr.head.ref}\`\n\n**Description:**\n${pr.body || 'No description provided'}\n\n**Link:** ${pr.html_url}\n\n---\n\n*This ticket was automatically created from Pull Request #${pr.number}*`,
-                  labels: ['frontend', 'project-management', 'pull-request']
+                  title: issueTitle,
+                  body: issueBody,
+                  labels: labels
                 });
                 
                 // Try to add issue to Project V2
@@ -194,7 +240,7 @@ jobs:
                       contentId: issue.data.node_id
                     });
                     
-                    console.log(`✅ Created project item for PR #${pr.number} via issue #${issue.data.number}`);
+                    console.log(`✅ Created project item via issue #${issue.data.number}`);
                   } catch (error) {
                     console.log('Could not add issue to Project V2, trying legacy API');
                     // Fallback to legacy API
@@ -203,7 +249,7 @@ jobs:
                       content_id: issue.data.id,
                       content_type: 'Issue'
                     });
-                    console.log(`✅ Created project card for PR #${pr.number} via issue #${issue.data.number}`);
+                    console.log(`✅ Created project card via issue #${issue.data.number}`);
                   }
                 } else {
                   // Legacy project
@@ -212,16 +258,18 @@ jobs:
                     content_id: issue.data.id,
                     content_type: 'Issue'
                   });
-                  console.log(`✅ Created project card for PR #${pr.number} via issue #${issue.data.number}`);
+                  console.log(`✅ Created project card via issue #${issue.data.number}`);
                 }
                 
-                // Comment on PR
-                await github.rest.issues.createComment({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: pr.number,
-                  body: `📋 **Project Ticket Created**\n\nIssue #${issue.data.number} has been created and added to the project board.\n\nView issue: ${issue.data.html_url}`
-                });
+                // Comment on PR if it's a PR
+                if (isPR && prNumber) {
+                  await github.rest.issues.createComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: parseInt(prNumber),
+                    body: `📋 **Project Ticket Created**\n\nIssue #${issue.data.number} has been created and added to the project board.\n\nView issue: ${issue.data.html_url}`
+                  });
+                }
               } catch (error) {
                 console.log('Error creating project item:', error.message);
                 throw error;
@@ -231,19 +279,33 @@ jobs:
       - name: Summary
         if: always()
         run: |
-          echo "## PR to Project Integration Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- **Repository:** Frontend (React)" >> $GITHUB_STEP_SUMMARY
-          echo "- **PR Number:** #${{ github.event.pull_request.number }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **PR Title:** ${{ github.event.pull_request.title }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Author:** @${{ github.event.pull_request.user.login }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Branch:** \`${{ github.event.pull_request.head.ref }}\`" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ github.event_name }}" == "pull_request" ]; then
+            echo "## PR to Project Integration Summary" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "- **Repository:** Frontend (React)" >> $GITHUB_STEP_SUMMARY
+            echo "- **PR Number:** #${{ github.event.pull_request.number }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **PR Title:** ${{ github.event.pull_request.title }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **Author:** @${{ github.event.pull_request.user.login }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **Branch:** \`${{ github.event.pull_request.head.ref }}\`" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## Push to Project Integration Summary" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "- **Repository:** Frontend (React)" >> $GITHUB_STEP_SUMMARY
+            echo "- **Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **Commit Message:** ${{ steps.pr_info.outputs.title }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **Author:** @${{ steps.pr_info.outputs.author }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **Branch:** \`${{ steps.pr_info.outputs.branch }}\`" >> $GITHUB_STEP_SUMMARY
+          fi
           echo "- **Project ID:** ${{ steps.project.outputs.id }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           if [ "${{ steps.project.outputs.id }}" != "" ]; then
             echo "✅ Project ticket creation attempted" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "The PR has been added to the project board." >> $GITHUB_STEP_SUMMARY
+            if [ "${{ github.event_name }}" == "pull_request" ]; then
+              echo "The PR has been added to the project board." >> $GITHUB_STEP_SUMMARY
+            else
+              echo "The push has been added to the project board." >> $GITHUB_STEP_SUMMARY
+            fi
           else
             echo "⚠️ No project found. Please create a GitHub Project first." >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
